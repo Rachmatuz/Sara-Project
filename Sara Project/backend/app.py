@@ -7,10 +7,10 @@ from database import (
     create_announcement, get_announcements, create_rating, get_ratings,
     save_chat, get_chat_logs, get_dashboard_stats
 )
-from flask import Flask, render_template, request, jsonify, send_from_directory, session
+from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect
 from flask_cors import CORS
-from werkzeug.utils import redirect, secure_filename
-import requests, os, sys
+from werkzeug.security import check_password_hash, generate_password_hash
+import requests, os, sys, json
 from datetime import datetime
 from functools import wraps
 
@@ -25,7 +25,7 @@ except ImportError:
 
 # ==================== INIT ====================
 app = Flask(__name__)
-app.secret_key = "sara_secret_key_2026"
+app.secret_key = os.environ.get('SECRET_KEY', 'sara_secret_key_2026_change_in_production')
 CORS(app)
 init_db()
 
@@ -50,52 +50,82 @@ GAYA: Ramah, profesional, gunakan emoji yang sesuai."""
 
 # ==================== MIDDLEWARE ====================
 def login_required(f):
+    """Decorator to require login"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            return jsonify({'error': 'Unauthorized'}), 401
+            return jsonify({'error': 'Unauthorized - Please login first'}), 401
         return f(*args, **kwargs)
     return decorated_function
 
 def admin_required(f):
+    """Decorator to require admin role"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            return jsonify({'error': 'Unauthorized'}), 401
+            return jsonify({'error': 'Unauthorized - Please login first'}), 401
         user = get_user_by_id(session['user_id'])
         if not user or user['role'] != 'admin':
-            return jsonify({'error': 'Forbidden'}), 403
+            return jsonify({'error': 'Forbidden - Admin access required'}), 403
         return f(*args, **kwargs)
     return decorated_function
 
 # ==================== AUTH ROUTES ====================
 @app.route("/login", methods=["GET", "POST"])
 def login():
-
+    """
+    Admin login route
+    GET: Show login form
+    POST: Process login credentials
+    """
+    
     if request.method == "POST":
-
-        username = request.form["username"]
-        password = request.form["password"]
-
-        try:
-            with open("admin.json", "r") as f:
-                admins = json.load(f)
-        except:
-            admins = []
-
-        for admin in admins:
-            if admin["username"] == username and admin["password"] == password:
-                session["hr"] = username
-                return redirect("/admin")
-
-        return render_template(
-            "login.html",
-            error="Username atau Password salah"
-        )
-
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+        
+        # Validate input
+        if not username or not password:
+            return render_template("login.html", error="Username dan password wajib diisi")
+        
+        print(f"\n{'='*60}")
+        print(f"🔐 Login attempt: {username}")
+        
+        # Get user from database
+        user = get_user_by_username(username)
+        
+        if user:
+            print(f"👤 User found: {user['nama']} (Role: {user['role']})")
+            # Simple plaintext comparison (TODO: implement hashing in production)
+            if user['password'] == password:
+                # Check if admin
+                if user['role'] == 'admin':
+                    # Create session
+                    session['user_id'] = user['id']
+                    session['username'] = user['username']
+                    session['role'] = user['role']
+                    session.permanent = True
+                    
+                    print(f"✅ Login successful: {username} (ID: {user['id']})")
+                    print(f"{'='*60}\n")
+                    return redirect("/admin")
+                else:
+                    print(f"❌ Non-admin user tried to login as admin: {username}")
+                    print(f"{'='*60}\n")
+                    return render_template("login.html", error="Hanya admin yang bisa login")
+            else:
+                print(f"❌ Wrong password for user: {username}")
+                print(f"{'='*60}\n")
+                return render_template("login.html", error="Username atau Password salah")
+        else:
+            print(f"❌ User not found: {username}")
+            print(f"{'='*60}\n")
+            return render_template("login.html", error="Username atau Password salah")
+    
     return render_template("login.html")
+
 @app.route('/api/register', methods=['POST'])
 def register():
+    """User registration endpoint"""
     data = request.json
     try:
         create_user(data['nama'], data['username'], data['password'], 
@@ -106,18 +136,23 @@ def register():
 
 @app.route('/api/logout')
 def logout():
+    """Logout and clear session"""
+    username = session.get('username', 'unknown')
     session.clear()
+    print(f"🔓 User logged out: {username}")
     return jsonify({'success': True})
 
 @app.route('/api/user')
 @login_required
 def get_user():
+    """Get current user info"""
     user = get_user_by_id(session['user_id'])
     return jsonify(user)
 
 # ==================== CHAT ROUTE ====================
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    """Main chat endpoint - processes user message"""
     try:
         data = request.json
         user_message = data.get('message', '').strip()
@@ -190,6 +225,7 @@ def chat():
 @app.route('/api/submissions', methods=['POST'])
 @login_required
 def create_pengajuan():
+    """Create leave/submission request"""
     try:
         user = get_user_by_id(session['user_id'])
         
@@ -211,19 +247,23 @@ def create_pengajuan():
                     lampiran = filename
 
         create_submission(session['user_id'], nama, nip, jenis, tanggal_mulai, tanggal_selesai, alasan, lampiran)
+        print(f"✅ Leave submission created: {nama} ({jenis})")
         return jsonify({'success': True, 'message': 'Pengajuan berhasil dikirim'})
     except Exception as e:
+        print(f"❌ Error creating submission: {str(e)}")
         return jsonify({'success': False, 'message': str(e)}), 400
 
 @app.route('/api/submissions', methods=['GET'])
 @login_required
 def list_pengajuan():
+    """Get user's submissions"""
     subs = get_submissions(session['user_id'])
     return jsonify(subs)
 
 @app.route('/api/submissions/<int:id>/status', methods=['PUT'])
 @admin_required
 def update_status(id):
+    """Update submission status (admin only)"""
     data = request.json
     status = data.get('status')
     
@@ -231,58 +271,128 @@ def update_status(id):
         return jsonify({'error': 'Status tidak valid'}), 400
     
     update_submission_status(id, status)
+    print(f"✅ Submission {id} status updated to: {status}")
     return jsonify({'message': f'Status diubah ke {status}'})
 
 # ==================== ADMIN ROUTES ====================
 @app.route('/admin')
 def admin():
+    """Admin dashboard page"""
+    # Check if user is logged in and is admin
+    if 'user_id' not in session:
+        print(f"⚠️  Unauthorized access to /admin - redirecting to login")
+        return redirect("/login")
+    
+    user = get_user_by_id(session['user_id'])
+    if not user or user['role'] != 'admin':
+        print(f"⚠️  Non-admin user {session.get('username')} tried to access admin")
+        return redirect("/login")
+    
     return send_from_directory(BASE_DIR, 'admin.html')
 
 @app.route('/api/stats')
 @admin_required
 def stats():
-    return jsonify(get_dashboard_stats())
+    """Get dashboard statistics (admin only)"""
+    try:
+        data = get_dashboard_stats()
+        print(f"📊 Stats retrieved for admin: {session.get('username')}")
+        return jsonify(data)
+    except Exception as e:
+        print(f"❌ Error getting stats: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/cuti')
 @admin_required
 def all_cuti():
-    subs = get_submissions()
-    return jsonify(subs)
+    """Get all leave requests (admin only)"""
+    try:
+        subs = get_submissions()
+        print(f"📋 Cuti list retrieved: {len(subs)} items")
+        return jsonify(subs)
+    except Exception as e:
+        print(f"❌ Error getting cuti: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/pengumuman', methods=['POST'])
 @admin_required
 def buat_pengumuman():
+    """Create announcement (admin only)"""
     data = request.json
-    create_announcement(data.get('judul'), data.get('isi'), data.get('tipe', 'info'), session['user_id'])
-    return jsonify({'message': 'Pengumuman berhasil dibuat'})
+    try:
+        judul = data.get('judul', '').strip()
+        isi = data.get('isi', '').strip()
+        tipe = data.get('tipe', 'info')
+        
+        if not judul or not isi:
+            return jsonify({'error': 'Judul dan isi wajib diisi'}), 400
+        
+        create_announcement(judul, isi, tipe, session['user_id'])
+        print(f"✅ Announcement created: '{judul}' by {session.get('username')}")
+        return jsonify({'message': 'Pengumuman berhasil dibuat'})
+    except Exception as e:
+        print(f"❌ Error creating announcement: {str(e)}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/api/pengumuman', methods=['GET'])
 def list_pengumuman():
-    return jsonify(get_announcements())
+    """Get all announcements (public)"""
+    try:
+        announcements = get_announcements()
+        return jsonify(announcements)
+    except Exception as e:
+        print(f"❌ Error getting announcements: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/survey', methods=['POST'])
 def submit_survey():
+    """Submit survey response"""
     data = request.json
-    create_rating(session.get('user_id'), data.get('nama'), data.get('rating'), data.get('saran'))
-    return jsonify({'message': 'Terima kasih atas feedback Anda!'})
+    try:
+        rating = data.get('rating')
+        if not rating or rating < 1 or rating > 5:
+            return jsonify({'error': 'Rating harus antara 1-5'}), 400
+        
+        create_rating(session.get('user_id'), data.get('nama'), rating, data.get('saran'))
+        print(f"⭐ Survey submitted: {rating} stars")
+        return jsonify({'message': 'Terima kasih atas feedback Anda!'})
+    except Exception as e:
+        print(f"❌ Error submitting survey: {str(e)}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/api/survey', methods=['GET'])
 @admin_required
 def list_survey():
-    return jsonify(get_ratings())
+    """Get all survey responses (admin only)"""
+    try:
+        ratings = get_ratings()
+        print(f"⭐ Survey list retrieved: {len(ratings)} responses")
+        return jsonify(ratings)
+    except Exception as e:
+        print(f"❌ Error getting survey: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/chat-logs', methods=['GET'])
 @admin_required
 def get_logs():
-    return jsonify(get_chat_logs())
+    """Get chat logs (admin only)"""
+    try:
+        logs = get_chat_logs()
+        print(f"💬 Chat logs retrieved: {len(logs)} logs")
+        return jsonify(logs)
+    except Exception as e:
+        print(f"❌ Error getting chat logs: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # ==================== STATIC ====================
 @app.route('/')
 def index():
+    """Home page"""
     return send_from_directory(BASE_DIR, 'index.html')
 
 @app.route('/<path:filename>')
 def serve_static(filename):
+    """Serve static files"""
     try:
         return send_from_directory(BASE_DIR, filename)
     except:
@@ -290,6 +400,7 @@ def serve_static(filename):
 
 @app.route('/api/test', methods=['GET'])
 def test():
+    """Health check endpoint"""
     return jsonify({
         'status': 'ok',
         'message': 'SARA Server Running',
@@ -298,8 +409,21 @@ def test():
         'groq_enabled': GROQ_ENABLED and bool(GROQ_API_KEY)
     })
 
+# ==================== ERROR HANDLERS ====================
+@app.errorhandler(404)
+def not_found(e):
+    """Handle 404 errors"""
+    return jsonify({'error': 'Resource not found'}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    """Handle 500 errors"""
+    print(f"❌ Server error: {str(e)}")
+    return jsonify({'error': 'Server error'}), 500
+
 # ==================== LLM FUNCTIONS ====================
 def call_groq(message):
+    """Call Groq API for response"""
     try:
         headers = {
             'Authorization': f'Bearer {GROQ_API_KEY}',
@@ -319,12 +443,13 @@ def call_groq(message):
         if response.status_code == 200:
             return response.json()['choices'][0]['message']['content']
         else:
-            print(f"❌ Groq error {response.status_code}")
+            print(f"❌ Groq error {response.status_code}: {response.text}")
     except Exception as e:
         print(f"❌ Groq error: {str(e)}")
     return None
 
 def call_ollama(message):
+    """Call Ollama local LLM for response"""
     try:
         response = requests.post(OLLAMA_URL,
             json={
@@ -354,6 +479,7 @@ if __name__ == '__main__':
     print('='*60)
     print('🌐 Server running at http://localhost:5000')
     print('⚙️  Admin at http://localhost:5000/admin')
+    print('📝 Default admin - username: admin | password: admin123')
     print('='*60 + '\n')
 
     port = int(os.environ.get('PORT', 5000))
